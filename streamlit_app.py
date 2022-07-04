@@ -1,38 +1,54 @@
-from collections import namedtuple
-import altair as alt
-import math
-import pandas as pd
-import streamlit as st
-
-"""
-# Welcome to Streamlit!
-
-Edit `/streamlit_app.py` to customize this app to your heart's desire :heart:
-
-If you have any questions, checkout our [documentation](https://docs.streamlit.io) and [community
-forums](https://discuss.streamlit.io).
-
-In the meantime, below is an example of what you can do with just a few lines of code:
-"""
+from streamlit_server_state import server_state, server_state_lock
+from streamlit_webrtc import ClientSettings, WebRtcMode, webrtc_streamer
 
 
-with st.echo(code_location='below'):
-    total_points = st.slider("Number of points in spiral", 1, 5000, 2000)
-    num_turns = st.slider("Number of turns in spiral", 1, 100, 9)
+def main():
+    if "webrtc_contexts" not in server_state:
+        server_state["webrtc_contexts"] = []
 
-    Point = namedtuple('Point', 'x y')
-    data = []
+    self_ctx = webrtc_streamer(
+        key="self",
+        mode=WebRtcMode.SENDRECV,
+        client_settings=ClientSettings(
+            rtc_configuration={
+                "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+            },
+            media_stream_constraints={"video": True, "audio": True},
+        ),
+        sendback_audio=False,
+    )
 
-    points_per_turn = total_points / num_turns
+    with server_state_lock["webrtc_contexts"]:
+        webrtc_contexts = server_state["webrtc_contexts"]
+        if self_ctx.state.playing and self_ctx not in webrtc_contexts:
+            webrtc_contexts.append(self_ctx)
+            server_state["webrtc_contexts"] = webrtc_contexts
+        elif not self_ctx.state.playing and self_ctx in webrtc_contexts:
+            webrtc_contexts.remove(self_ctx)
+            server_state["webrtc_contexts"] = webrtc_contexts
 
-    for curr_point_num in range(total_points):
-        curr_turn, i = divmod(curr_point_num, points_per_turn)
-        angle = (curr_turn + 1) * 2 * math.pi * i / points_per_turn
-        radius = curr_point_num / total_points
-        x = radius * math.cos(angle)
-        y = radius * math.sin(angle)
-        data.append(Point(x, y))
+    active_other_ctxs = [
+        ctx for ctx in webrtc_contexts if ctx != self_ctx and ctx.state.playing
+    ]
 
-    st.altair_chart(alt.Chart(pd.DataFrame(data), height=500, width=500)
-        .mark_circle(color='#0068c9', opacity=0.5)
-        .encode(x='x:Q', y='y:Q'))
+    for ctx in active_other_ctxs:
+        webrtc_streamer(
+            key=str(id(ctx)),
+            mode=WebRtcMode.RECVONLY,
+            client_settings=ClientSettings(
+                rtc_configuration={
+                    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+                },
+                media_stream_constraints={
+                    "video": True,
+                    "audio": True,
+                },
+            ),
+            source_audio_track=ctx.output_audio_track,
+            source_video_track=ctx.output_video_track,
+            desired_playing_state=ctx.state.playing,
+        )
+
+
+if __name__ == "__main__":
+    main()
